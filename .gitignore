@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Environments
+.venv/
+.env
+.env.*
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# loopguard run data (event logs hold raw tool data - never commit them)
+.loopguard/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
