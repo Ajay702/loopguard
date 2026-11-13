@@ -69,7 +69,7 @@ flowchart TD
 |---|---|---|
 | Agent loop | The agent thinks, uses tools, reads the results and repeats | Manual Messages API loop. Parallel tool calls run concurrently and every result goes back in one message. Assistant turns, including thinking blocks, are passed back unchanged. Handles `end_turn`, `tool_use`, `pause_turn`, `max_tokens` and `refusal` |
 | Tool declarations | Describe a tool once, in normal Python | `@tool` derives a pydantic model from type hints and docstrings, then emits a JSON schema with `strict: true` and `additionalProperties: false` |
-| Budgets | Hard spending and time limits | Per-run caps on steps, tokens, USD (Opus/Sonnet/Haiku 5.5 price table) and wall-clock time, plus per-tool timeouts. A predictive guard refuses a step that would cross the cap |
+| Budgets | Hard spending and time limits | Per-run caps on steps, tokens, USD (Opus/Sonnet/Haiku 5.5 price table) and wall-clock time, plus per-tool timeouts. A predictive guard refuses a step that is likely to cross the cap (see [Performance and stress tests](#performance-and-stress-tests)) |
 | Resilience | Temporary outages don't kill the task | Exponential backoff with full jitter that honours `retry-after`. Retries only typed retryable SDK errors (429, 5xx, 529, connection); 400s fail fast. Per-tool circuit breakers. Automatic retries only for idempotent tools |
 | Checkpoints | Survives crashes without repeating work | Append-only, fsync'd JSONL event log. `resume(run_id)` rebuilds the conversation, reuses finished tool results, and re-runs only in-flight calls with a stable idempotency key |
 | Permission policy | Some actions are allowed, some need sign-off, some are forbidden | Glob rules with argument predicates. The most restrictive matching rule wins. Fails closed. `ask` without an approver becomes `deny` |
@@ -110,6 +110,24 @@ This is the real output of `loopguard eval`, which runs offline with a scripted 
 - **Crashes don't cause double refunds.** The test simulated a crash at each of 24 points in a run, before and after every log write, and resumed each time. Every resumed run ended with exactly one refund, exactly one email, and a conversation identical to a run that never crashed.
 
 > Live mode (`loopguard eval --live`) runs the same scenarios against Claude. It was **not** run for these results, and no live numbers are claimed here. Scenarios that need scripted control (crash points, forced refusals, timing) are skipped in live mode, as are checks that only make sense when the model takes the bait.
+
+### Performance and stress tests
+
+`uv run python benchmarks/bench.py`, measured on an Apple M4 laptop with Python 3.13, offline (scripted model, no API key):
+
+| Test | Result |
+|---|---|
+| **Overhead per agent step** (20-tool-call run, median of 30) | **+0.40–0.42 ms/step** with fsync off, **+0.45 ms/step** with fsync'd checkpoints, compared with a bare model→tool loop. A real Claude call takes 1–10 s, so that is under 0.05% of a step |
+| **Crash at every event boundary** (20 charges, 63 events, crashed before and after each one) | **125/125** crash points resumed and completed. **0 double charges.** 20 in-flight calls re-ran with the same idempotency key, and the ledger deduplicated them |
+| **Resume time** after a crash | p50 **5.5 ms**, max 9.5 ms |
+| **USD cap, $0.25 / $1.00 / $5.00** (runaway agent, 500 scripted tool calls) | Stopped at **94.8% / 99.2% / 99.4%** of the cap. Never went over |
+| **USD cap, $0.05** | Stopped at **$0.0503 (100.5%)**: one step over, by $0.0003 |
+
+**How to read these:**
+
+- **The budget cap is a near-hard limit, not an exact one.** The predictive guard estimates the next step from the cost of the last one. Context grows every step, so the next step can cost slightly more than estimated. With tiny caps, where one step is a large share of the budget, a run can finish up to one step's growth over the cap. Set the cap a little below your real limit.
+- **Exactly-once needs your downstream to help.** loopguard never re-runs a call whose result was logged. A call that was in flight when the process died is re-run with the *same* idempotency key. The guarantee holds when the API you call deduplicates on that key, as Stripe and most payment APIs do.
+- **fsync cost depends on the OS.** On macOS, `os.fsync` does not force a physical disk flush, so the fsync row above is optimistic. Expect more on Linux with real disk flushes. Turn `fsync=False` on only where losing the last event in a power cut is acceptable.
 
 ---
 
